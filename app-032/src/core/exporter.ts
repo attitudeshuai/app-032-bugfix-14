@@ -1,7 +1,8 @@
 /** 导出：构件清单 / 裁片清单 / 备料单（CSV，本地生成，无外部请求） */
 import type { FrameMember, Lantern, Panel } from './types'
 import type { BatchMaterials, SingleLightMaterials } from './materials'
-import { coveringSpec } from './craft'
+import { coveringSpec, CRAFT } from './craft'
+import { panelCutArea, panelNetArea } from './panels'
 
 function csvCell(v: string | number): string {
   const s = String(v)
@@ -76,6 +77,13 @@ export function panelsCsv(l: Lantern, panels: Panel[]): string {
       p.marksMm.length
     ])
   }
+  const totalQty = panels.reduce((s, p) => s + p.qty, 0)
+  const netM2 = panels.reduce((s, p) => s + panelNetArea(p) * p.qty, 0) / 1_000_000
+  const cutM2 = panels.reduce((s, p) => s + panelCutArea(p) * p.qty, 0) / 1_000_000
+  rows.push([])
+  rows.push(['合计', '', '', '', '', '', '', '', '', '', totalQty, ''])
+  rows.push(['裁片净面积合计（不含缝份，m²）', netM2.toFixed(3)])
+  rows.push(['裁片面积合计（含缝份，备料/用胶口径，m²）', cutM2.toFixed(3)])
   return toCsv(rows)
 }
 
@@ -87,16 +95,17 @@ export function materialsCsv(
   const cov = coveringSpec(l.covering)
   const rows: (string | number)[][] = [
     [`备料单 · ${l.name}`],
-    [`生成 ${new Date().toLocaleString()} / 单位 mm·m²·m·g`],
+    [`生成 ${new Date().toLocaleString()} / 长度·面积保留 3 位小数（m、m²），胶保留 1 位小数（g）`],
+    [`口径：竹篾/蒙面(含缝份)/扎线/胶 批量=单灯×数量×(1+损耗率 ${(batch.wasteRatio * 100).toFixed(0)}%)；LED=单灯×数量（整数颗，不摊损耗）；净长/净面积为核对量，批量=单灯×数量`],
     [],
-    ['项目', '单灯用量', '单位', `批量 ${batch.count} 个（含 ${(batch.wasteRatio * 100).toFixed(0)}% 损耗）`],
-    ['竹篾/铁丝（含绑扎余量）', single.frameM.toFixed(3), 'm', batch.frameM.toFixed(3)],
-    ['竹篾构件净长', single.frameRawM.toFixed(3), 'm', batch.frameRawM.toFixed(3)],
-    [`蒙面（${cov.name}，含缝份）`, single.coveringM2.toFixed(3), 'm²', batch.coveringM2.toFixed(3)],
-    ['蒙面净面积（不含缝份）', single.coveringNetM2.toFixed(3), 'm²', batch.coveringNetM2.toFixed(3)],
-    ['扎线', single.lashM.toFixed(3), 'm', batch.lashM.toFixed(3)],
-    ['胶', single.glueG.toFixed(1), 'g', batch.glueG.toFixed(1)],
-    ['LED 灯珠建议', single.ledCount, '颗', batch.ledCount],
+    ['项目', '单灯用量', '单位', `批量 ${batch.count} 个`, '口径'],
+    ['竹篾/铁丝（含绑扎余量）', single.frameM.toFixed(3), 'm', batch.frameM.toFixed(3), `×${batch.count}×(1+${(batch.wasteRatio * 100).toFixed(0)}%)`],
+    ['竹篾构件净长合计（核对量）', single.frameRawM.toFixed(3), 'm', batch.frameRawM.toFixed(3), `×${batch.count}`],
+    [`蒙面（${cov.name}，含缝份）`, single.coveringM2.toFixed(3), 'm²', batch.coveringM2.toFixed(3), `×${batch.count}×(1+${(batch.wasteRatio * 100).toFixed(0)}%)`],
+    ['蒙面净面积（不含缝份，核对量）', single.coveringNetM2.toFixed(3), 'm²', batch.coveringNetM2.toFixed(3), `×${batch.count}`],
+    [`扎线（${single.lashJoints} 处绑扎 × ${CRAFT.lashPerJointM}m/处）`, single.lashM.toFixed(3), 'm', batch.lashM.toFixed(3), `×${batch.count}×(1+${(batch.wasteRatio * 100).toFixed(0)}%)`],
+    [`胶（含缝份面积 × ${cov.gluePerM2}g/m²）`, single.glueG.toFixed(1), 'g', batch.glueG.toFixed(1), `×${batch.count}×(1+${(batch.wasteRatio * 100).toFixed(0)}%)`],
+    ['LED 灯珠建议', single.ledCount, '颗', batch.ledCount, `×${batch.count}（不摊损耗）`],
     [],
     ['灯体体积', single.volumeL.toFixed(3), 'L', batch.volumeL.toFixed(3)],
     ['灯体表面积', single.surfaceM2.toFixed(3), 'm²', batch.surfaceM2.toFixed(3)]

@@ -3,12 +3,12 @@
  * 每次参数变化都会重算全部几何并跑一遍断言，结果直接显示在界面上。
  */
 import type { CheckResult, Lantern } from './types'
-import { bodySurfaceArea, polygonEdge, ringPerimeter, segmentInfos } from './geometry'
+import { bodySurfaceArea, polygonEdge, r1, r3, ringPerimeter, segmentInfos } from './geometry'
 import { buildFrame, type FrameResult } from './frame'
 import { buildPanels, panelNetArea, type PanelResult } from './panels'
-import { computeBatch, computeMaterials, type BatchMaterials, type SingleLightMaterials } from './materials'
+import { computeBatch, computeMaterials, normalizeCount, type BatchMaterials, type SingleLightMaterials } from './materials'
 import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet } from './paginate'
-import { CRAFT } from './craft'
+import { CRAFT, coveringSpec } from './craft'
 
 export interface FullResult {
   frame: FrameResult
@@ -28,7 +28,7 @@ export function computeAll(l: Lantern, loft: LoftOptions): FullResult {
   const frame = buildFrame(l)
   const panels = buildPanels(l)
   const materials = computeMaterials(l)
-  const batch = computeBatch(materials, Math.max(1, Math.round(l.batchCount)), l.wasteRatio)
+  const batch = computeBatch(materials, normalizeCount(l.batchCount), l.wasteRatio)
   const sheets = paginate(l, loft)
   const elapsedMs = performance.now() - t0
   const checks = runChecks(l, frame, panels, materials, batch, sheets, elapsedMs)
@@ -161,21 +161,27 @@ function runChecks(
 
   // ---- CHK-07 批量 ----
   {
-    const n = Math.max(1, Math.round(l.batchCount))
+    const n = normalizeCount(l.batchCount)
     const k = n * (1 + l.wasteRatio)
+    // 竹篾/蒙面/扎线/胶随损耗放大；净长/净面积只随数量；LED 整数颗、只随数量。
     // 与单灯值的偏差只来自展示精度（长度 3 位小数 / 胶 1 位小数）
     const errs = [
       Math.abs(batch.frameM - materials.frameM * k),
       Math.abs(batch.coveringM2 - materials.coveringM2 * k),
-      Math.abs(batch.lashM - materials.lashM * k)
+      Math.abs(batch.lashM - materials.lashM * k),
+      Math.abs(batch.frameRawM - materials.frameRawM * n),
+      Math.abs(batch.coveringNetM2 - materials.coveringNetM2 * n)
     ]
-    const pass = errs.every((e) => e <= 0.0011) && Math.abs(batch.glueG - materials.glueG * k) <= 0.051
+    const pass =
+      errs.every((e) => e <= 0.0011) &&
+      Math.abs(batch.glueG - materials.glueG * k) <= 0.051 &&
+      batch.ledCount === materials.ledCount * n
     out.push({
       id: 'CHK-07',
-      title: `批量制灯：${n} 个材料总量 = 单灯 × ${n} × (1 + ${(l.wasteRatio * 100).toFixed(0)}%)`,
+      title: `批量制灯：${n} 个总量 = 单灯 × ${n}（竹篾/蒙面/扎线/胶再乘 (1 + ${(l.wasteRatio * 100).toFixed(0)}%)）`,
       pass,
       value: `竹篾 ${f3(batch.frameM)}m / 蒙面 ${f3(batch.coveringM2)}m²`,
-      detail: `单灯竹篾 ${f3(materials.frameM)}m × ${n} × ${(1 + l.wasteRatio).toFixed(2)} = ${f3(materials.frameM * k)}m = 批量值；蒙面、扎线、胶同理（LED 按颗数 × ${n} 计，不参与损耗）`
+      detail: `竹篾、蒙面（含缝份）、扎线、胶按 单灯 × ${n} × ${(1 + l.wasteRatio).toFixed(2)}；构件净长与蒙面净面积为核对量，按 单灯 × ${n}；LED ${batch.ledCount} 颗 = ${materials.ledCount} × ${n}，整数颗、不参与损耗`
     })
   }
 
@@ -188,6 +194,77 @@ function runChecks(
       pass,
       value: `${elapsedMs.toFixed(1)}ms`,
       detail: `${l.divisions} 等分 × ${l.layers.length} 层：构件 ${frame.totalQty} 根、裁片 ${panels.totalQty} 块、图纸 ${sheets.length} 页，全流程耗时 ${elapsedMs.toFixed(1)}ms（含分页）`
+    })
+  }
+
+  // ---- CHK-09 材料口径跨页一致（材料页 / 裁片页 / 骨架件表 / 备料单同一数值） ----
+  {
+    const items: { name: string; pass: boolean; detail: string }[] = []
+    const approx = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps
+
+    // 备料总长 ↔ 骨架件表「截取长度（含余量）」合计
+    const stockM = frame.stockLengthMm / 1000
+    items.push({
+      name: '竹篾备料 = 骨架件表含余量总长',
+      pass: approx(r3(stockM), materials.frameM),
+      detail: `${f3(materials.frameM)}m / 表合计 ${f3(stockM)}m`
+    })
+
+    // 净长合计 ↔ 骨架件表「净长」合计
+    const rawM = frame.rawLengthMm / 1000
+    items.push({
+      name: '构件净长 = 骨架件表净长合计',
+      pass: approx(r3(rawM), materials.frameRawM),
+      detail: `${f3(materials.frameRawM)}m / 表合计 ${f3(rawM)}m`
+    })
+
+    // 含缝份蒙面 ↔ 裁片页「含缝份裁片面积」
+    const cutM2 = panels.cutAreaMm2 / 1_000_000
+    items.push({
+      name: '蒙面（含缝份）= 裁片页含缝份面积',
+      pass: approx(r3(cutM2), materials.coveringM2),
+      detail: `${f3(materials.coveringM2)}m² / 裁片页 ${f3(cutM2)}m²`
+    })
+
+    // 净面积 ↔ 裁片页「裁片净面积」
+    const netM2 = panels.netAreaMm2 / 1_000_000
+    items.push({
+      name: '蒙面净面积 = 裁片页净面积',
+      pass: approx(r3(netM2), materials.coveringNetM2),
+      detail: `${f3(materials.coveringNetM2)}m² / 裁片页 ${f3(netM2)}m²`
+    })
+
+    // 扎线 = 绑扎总处数 × 每处用线量；总处数 = Σ 数量 × 每根绑扎处数
+    const joints = frame.members.reduce((a, m) => a + m.qty * m.lashJoints, 0)
+    items.push({
+      name: '扎线 = 绑扎总处数 × 每处用线量',
+      pass: joints === materials.lashJoints && approx(r3(joints * CRAFT.lashPerJointM), materials.lashM),
+      detail: `${joints} 处 × ${CRAFT.lashPerJointM}m/处 = ${f3(materials.lashM)}m`
+    })
+
+    // 胶 = 含缝份裁片面积 × 材料 g/m²（不用净面积）
+    const covSpec = coveringSpec(l.covering)
+    const glueExpect = r1((panels.cutAreaMm2 / 1_000_000) * covSpec.gluePerM2)
+    items.push({
+      name: `胶 = 含缝份面积 × ${covSpec.name} ${covSpec.gluePerM2}g/m²`,
+      pass: approx(glueExpect, materials.glueG, 0.05),
+      detail: `${f3(panels.cutAreaMm2 / 1_000_000)}m² × ${covSpec.gluePerM2}g/m² = ${f1(materials.glueG)}g`
+    })
+
+    // LED 整数颗
+    items.push({
+      name: 'LED 为整数颗（只随数量放大，不摊损耗）',
+      pass: Number.isInteger(materials.ledCount) && materials.ledCount >= CRAFT.led.min,
+      detail: `单灯 ${materials.ledCount} 颗（最低 ${CRAFT.led.min} 颗）`
+    })
+
+    const bad = items.filter((x) => !x.pass)
+    out.push({
+      id: 'CHK-09',
+      title: '材料口径一致：材料页 / 备料单 / 裁片页 / 骨架件表同源同数',
+      pass: bad.length === 0,
+      value: bad.length === 0 ? `${items.length}/${items.length} 项一致` : `${bad.length} 项对不上`,
+      detail: items.map((x) => `${x.pass ? '✓' : '✗'} ${x.name}（${x.detail}）`).join('；')
     })
   }
 

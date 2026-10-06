@@ -30,6 +30,12 @@ const full = computed(() => {
 const geo = computed(() => (lantern.value ? buildGeometry(lantern.value) : null))
 const shoulderPct = computed(() => (geo.value ? ((geo.value.kTop + geo.value.kBot) * 100).toFixed(0) : '0'))
 
+/** 批量数量无效（空 / 0 / 非正整数）时提示，计算按 1 兜底 */
+const countInvalid = computed(() => {
+  const raw = Number(lantern.value?.batchCount)
+  return !Number.isFinite(raw) || Math.round(raw) < 1
+})
+
 /** 边界提示：收口/底口直径不应超过最大直径（几何会按最大直径截断） */
 const diameterWarn = computed(() => {
   const l = lantern.value
@@ -297,6 +303,9 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
           <input v-model.number="lantern.wasteRatio" type="range" min="0" max="0.2" step="0.01" />
         </div>
       </div>
+      <small v-if="countInvalid" class="hint warn">
+        批量数量必须是 ≥ 1 的整数；当前数量无效，材料统计暂按 1 盏计算。
+      </small>
 
       <h3>尺寸反推（由现有竹篾反推尺寸）</h3>
       <div class="reverse">
@@ -482,6 +491,11 @@ small {
 .hint {
   display: block;
   margin-top: 6px;
+}
+
+.hint.warn {
+  color: #b3241f;
+  font-weight: 600;
 }
 
 .warn-line {

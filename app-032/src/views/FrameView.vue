@@ -93,9 +93,9 @@ function exportCsv() {
     </section>
 
     <ChecksPanel
-      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-08'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-09', 'CHK-01', 'CHK-02', 'CHK-04', 'CHK-08'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
-      title="骨架计算自检"
+      title="骨架与口径自检"
     />
   </div>
 </template>
