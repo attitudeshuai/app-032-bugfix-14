@@ -8,6 +8,7 @@ import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { downloadText, materialsCsv } from '../core/exporter'
 import { coveringSpec, CRAFT } from '../core/craft'
 import { panelCutArea } from '../core/panels'
+import { normalizeBatchCount } from '../core/materials'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,23 +21,50 @@ const full = computed(() => {
 
 const cov = computed(() => (lantern.value ? coveringSpec(lantern.value.covering) : null))
 
+/** 批量数量：<1 或非法时为 0 —— 界面给出提示，批量列出「—」，不出空表 */
+const batchCount = computed(() => normalizeBatchCount(lantern.value?.batchCount))
+const batchOk = computed(() => batchCount.value >= 1)
+
 const layerFabric = computed(() => {
   const l = lantern.value
   if (!l || !full.value) return []
-  return l.layers.map((ly, i) => {
-    const ps = full.value!.panels.panels.filter((p) => p.layerIndex === i)
-    const area = ps.reduce((s, p) => s + panelCutArea(p) * p.qty, 0)
-    return {
-      i: i + 1,
-      color: l.layerColors[i] || l.color,
-      height: ly.heightMm,
-      diameter: ly.diameterMm,
-      kinds: ps.length,
-      perPiece: ps.length ? panelCutArea(ps[0]) : 0,
-      qty: ps.length,
-      areaM2: area / 1e6
-    }
-  })
+  const rows = l.layers
+    .map((ly, i) => {
+      const ps = full.value!.panels.panels.filter((p) => p.layerIndex === i)
+      const area = ps.reduce((s, p) => s + panelCutArea(p) * p.qty, 0)
+      return {
+        key: `layer-${i}`,
+        label: `第 ${i + 1} 层`,
+        color: l.layerColors[i] || l.color,
+        height: `${ly.heightMm.toFixed(1)}`,
+        diameter: `${ly.diameterMm.toFixed(1)}`,
+        kinds: ps.length,
+        perPiece: ps.length ? panelCutArea(ps[0]) : 0,
+        qty: ps.reduce((s, p) => s + p.qty, 0),
+        areaM2: area / 1e6
+      }
+    })
+    .filter((r) => r.qty > 0)
+  // 顶/底盖（多面体的侧片也在此列，layerIndex < 0），买布时不能漏
+  for (const p of full.value!.panels.panels.filter((x) => x.layerIndex < 0)) {
+    rows.push({
+      key: `cap-${p.id}`,
+      label: p.label,
+      color: p.color,
+      height: '—',
+      diameter: p.radiusMm ? `${(p.radiusMm * 2).toFixed(1)}` : '—',
+      kinds: 1,
+      perPiece: panelCutArea(p),
+      qty: p.qty,
+      areaM2: (panelCutArea(p) * p.qty) / 1e6
+    })
+  }
+  return rows
+})
+
+const fabricTotal = computed(() => {
+  const p = full.value?.panels
+  return p ? { qty: p.totalQty, kinds: p.panels.length, areaM2: p.cutAreaMm2 / 1e6 } : null
 })
 
 function exportCsv() {
@@ -66,14 +94,18 @@ function exportCsv() {
     <section class="batch">
       <div class="field">
         <label>批量数量（个）</label>
-        <input v-model.number="lantern.batchCount" type="number" min="1" max="500" step="1" />
+        <input v-model.number="lantern.batchCount" type="number" min="0" max="500" step="1" />
       </div>
       <div class="field">
         <label>损耗率 <em>{{ (lantern.wasteRatio * 100).toFixed(0) }}%</em></label>
         <input v-model.number="lantern.wasteRatio" type="range" min="0" max="0.2" step="0.01" />
       </div>
-      <p class="formula mono">
-        批量 = 单灯 × {{ Math.max(1, Math.round(lantern.batchCount)) }} × {{ (1 + lantern.wasteRatio).toFixed(2) }}
+      <p v-if="batchOk" class="formula mono">
+        批量 = 单灯 × {{ batchCount }} × {{ (1 + lantern.wasteRatio).toFixed(2) }}
+        <small>（竹篾/蒙面/扎线/胶；净长等几何量与 LED 只 × {{ batchCount }}）</small>
+      </p>
+      <p v-else class="formula warn-zero">
+        ⚠ 批量数量为 0（或未填）：备料单需要至少 1 盏，请输入 ≥ 1 的整数；当前只列单灯用量，不出批量空表。
       </p>
     </section>
 
@@ -83,44 +115,44 @@ function exportCsv() {
           <tr>
             <th>项目</th>
             <th class="num">单灯</th>
-            <th class="num">批量 {{ full.batch.count }} 个（含损耗）</th>
+            <th class="num">批量 {{ batchOk ? full.batch.count : '—' }} 个（含损耗）</th>
           </tr>
         </thead>
         <tbody>
           <tr>
             <td>竹篾 / 铁丝（含绑扎余量）</td>
             <td class="num mono">{{ full.materials.frameM.toFixed(3) }} m</td>
-            <td class="num mono strong">{{ full.batch.frameM.toFixed(3) }} m</td>
+            <td class="num mono strong">{{ batchOk ? `${full.batch.frameM.toFixed(3)} m` : '—' }}</td>
           </tr>
           <tr>
-            <td>构件净长合计</td>
+            <td>构件净长合计（不含余量，几何量不记损耗）</td>
             <td class="num mono">{{ full.materials.frameRawM.toFixed(3) }} m</td>
-            <td class="num mono">{{ full.batch.frameRawM.toFixed(3) }} m</td>
+            <td class="num mono">{{ batchOk ? `${full.batch.frameRawM.toFixed(3)} m` : '—' }}</td>
           </tr>
           <tr>
             <td>蒙面 {{ cov.name }}（含缝份）</td>
             <td class="num mono">{{ full.materials.coveringM2.toFixed(3) }} m²</td>
-            <td class="num mono strong">{{ full.batch.coveringM2.toFixed(3) }} m²</td>
+            <td class="num mono strong">{{ batchOk ? `${full.batch.coveringM2.toFixed(3)} m²` : '—' }}</td>
           </tr>
           <tr>
-            <td>蒙面净面积（不含缝份）</td>
+            <td>蒙面净面积（不含缝份，几何量不记损耗）</td>
             <td class="num mono">{{ full.materials.coveringNetM2.toFixed(3) }} m²</td>
-            <td class="num mono">{{ full.batch.coveringNetM2.toFixed(3) }} m²</td>
+            <td class="num mono">{{ batchOk ? `${full.batch.coveringNetM2.toFixed(3)} m²` : '—' }}</td>
           </tr>
           <tr>
             <td>扎线（{{ full.materials.lashJoints }} 处绑扎 × {{ CRAFT.lashPerJointM }}m/处）</td>
             <td class="num mono">{{ full.materials.lashM.toFixed(3) }} m</td>
-            <td class="num mono">{{ full.batch.lashM.toFixed(3) }} m</td>
+            <td class="num mono">{{ batchOk ? `${full.batch.lashM.toFixed(3)} m` : '—' }}</td>
           </tr>
           <tr>
-            <td>胶（{{ cov.name }} {{ cov.gluePerM2 }}g/m²）</td>
+            <td>胶（{{ cov.name }} {{ cov.gluePerM2 }}g/m² × 含缝份裁片面积）</td>
             <td class="num mono">{{ full.materials.glueG.toFixed(1) }} g</td>
-            <td class="num mono">{{ full.batch.glueG.toFixed(1) }} g</td>
+            <td class="num mono">{{ batchOk ? `${full.batch.glueG.toFixed(1)} g` : '—' }}</td>
           </tr>
           <tr class="led">
-            <td>LED 灯珠建议</td>
+            <td>LED 灯珠建议（按颗数 × 数量，不记损耗）</td>
             <td class="num mono">{{ full.materials.ledCount }} 颗</td>
-            <td class="num mono">{{ full.batch.ledCount }} 颗</td>
+            <td class="num mono">{{ batchOk ? `${full.batch.ledCount} 颗` : '—' }}</td>
           </tr>
         </tbody>
       </table>
@@ -135,7 +167,7 @@ function exportCsv() {
     </section>
 
     <section class="palette">
-      <h3>分层蒙面用量（按层买布/买纸用）</h3>
+      <h3>分层蒙面用量（按层买布/买纸用，含顶/底盖；合计 = 单灯含缝份面积）</h3>
       <table>
         <thead>
           <tr>
@@ -150,18 +182,28 @@ function exportCsv() {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="r in layerFabric" :key="r.i">
-            <td class="mono">第 {{ r.i }} 层</td>
+          <tr v-for="r in layerFabric" :key="r.key">
+            <td class="mono">{{ r.label }}</td>
             <td>
               <span class="dot" :style="{ background: r.color }" />
               <span class="mono">{{ r.color }}</span>
             </td>
-            <td class="num mono">{{ r.height.toFixed(1) }}</td>
-            <td class="num mono">{{ r.diameter.toFixed(1) }}</td>
+            <td class="num mono">{{ r.height }}</td>
+            <td class="num mono">{{ r.diameter }}</td>
             <td class="num mono">{{ r.kinds }}</td>
             <td class="num mono">{{ (r.perPiece / 1e6).toFixed(4) }}</td>
             <td class="num mono">{{ r.qty }}</td>
             <td class="num mono">{{ r.areaM2.toFixed(3) }}</td>
+          </tr>
+          <tr v-if="fabricTotal" class="total">
+            <td class="mono">合计</td>
+            <td>—</td>
+            <td class="num mono">—</td>
+            <td class="num mono">—</td>
+            <td class="num mono">{{ fabricTotal.kinds }}</td>
+            <td class="num mono">—</td>
+            <td class="num mono">{{ fabricTotal.qty }}</td>
+            <td class="num mono strong">{{ fabricTotal.areaM2.toFixed(3) }}</td>
           </tr>
         </tbody>
       </table>
@@ -287,6 +329,17 @@ input[type='range'] {
   border-radius: 6px;
 }
 
+.formula small {
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+.formula.warn-zero {
+  font-family: inherit;
+  font-weight: 600;
+  border: 1px solid #e7c3bb;
+}
+
 .tables {
   display: grid;
   grid-template-columns: 1fr minmax(240px, 300px);
@@ -332,6 +385,12 @@ input[type='range'] {
 .tally tr:last-child td,
 .palette tr:last-child td {
   border-bottom: none;
+}
+
+.palette tr.total td {
+  background: var(--surface-2);
+  font-weight: 700;
+  border-top: 1px solid var(--line-strong);
 }
 
 tr.led td {
